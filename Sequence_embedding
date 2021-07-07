@@ -1,0 +1,239 @@
+def one_step_attention(a, s_prev,repeator, concatenator,densor1, densor2,activator, dotor):
+    """
+    Performs one step of attention: Outputs a context vector computed as a dot product of the attention weights
+    "alphas" and the hidden states "a" of the Bi-LSTM.
+    
+    Arguments:
+    a -- hidden state output of the Bi-LSTM, numpy-array of shape (m, Tx, 2*n_a)
+    s_prev -- previous hidden state of the (post-attention) LSTM, numpy-array of shape (m, n_s)
+    
+    Returns:
+    context -- context vector, input of the next (post-attention) LSTM cell
+    """
+    
+    # Use repeator to repeat s_prev to be of shape (m, Tx, n_s) so that you can concatenate it with all hidden states "a"
+    s_prev = repeator(s_prev)
+    # Use concatenator to concatenate a and s_prev on the last axis 
+    concat = concatenator([a,s_prev])
+    # Use densor1 to propagate concat through a small fully-connected neural network to compute the "intermediate energies" variable e. 
+    e = densor1(concat)
+    # Use densor2 to propagate e through a small fully-connected neural network to compute the "energies" variable energies. 
+    energies = densor2(e)
+    # Use "activator" on "energies" to compute the attention weights "alphas" 
+    alphas = activator(energies)
+    # Use dotor together with "alphas" and "a" to compute the context vector to be given to the next (post-attention) LSTM-cell.
+    context = dotor([alphas,a])
+    
+    return context
+  
+  
+def sequence_transcation_fraud_detection_combined_with_entity_embeddings(Tx, Ty, n_a, n_s, input_size, out_size,index_positions_dict,index_original_dimensions_dict, index_desired_dimensions_dict,cat_features_amount):
+    """
+    Arguments:
+    Tx -- length of the input sequence
+    Ty -- length of the output sequence
+    n_a -- hidden state size of the Bi-LSTM
+    n_s -- hidden state size of the post-attention LSTM
+
+    Returns:
+    model -- Keras model instance
+    """
+    
+    #Define the components of the attention mechanism of which the weights are going to be shared acorss time steps. 
+    repeator = RepeatVector(Tx)
+    concatenator = Concatenate(axis=-1)
+    densor1 = Dense(10, activation = "tanh")
+    densor2 = Dense(1, activation = "relu")
+    activator = Activation("softmax", name='attention_weights') 
+    dotor = Dot(axes = 1)
+
+    
+    # Define the post_attention_lstm layer and the dense layers for the final hidden state of the post_attention_lstm layer.
+    post_activation_LSTM_cell = LSTM(n_s, return_state = True) # post-attention LSTM 
+    output_layer_1 = Dense(16, activation="relu")
+    output_layer_2 = Dense(16, activation="relu")
+    output_layer_3 = Dense(16, activation="relu")
+    output_layer_4 = Dense(8, activation="relu")
+    output_layer_5 = Dense(1, activation="sigmoid")
+    
+    bn = keras.layers.BatchNormalization()
+    drop = keras.layers.Dropout(0.5)
+    
+    
+    # Define the entity embeddings component for the categorical variables
+    embeddings_transform_layers = {}
+    embeddings_bn_layers = {}
+    embeddings_reshape_layers = {}
+    features_trans_layers = {}
+    features_trans_bn_layers = {}
+    
+            
+    for key in index_positions_dict.keys():
+
+      embeddings_transform_layer_name = key + "embedding_transform"
+      embeddings_bn_layer_name = key + "embedding_bn"
+      embeddings_reshape_layer_name = key + "embedding_reshape"
+      features_trans_layer_name = key + "features_trans"
+      features_trans_bn_layer_name = key + "features_trans_bn"
+      
+
+      index_original_dimensions= index_original_dimensions_dict[key]
+      index_desired_dimensions = index_desired_dimensions_dict[key]
+
+      #Embeddings
+      embeddings_transform_layer = tf.keras.layers.Embedding(index_original_dimensions,index_desired_dimensions)
+      embeddings_reshape_layer = tf.keras.layers.Reshape((Tx,index_desired_dimensions, ))
+      embeddings_bn_layer = tf.keras.layers.BatchNormalization()
+      
+      #Transformation for the embeddings
+      features_trans_layer = tf.keras.layers.Dense(index_desired_dimensions, activation="relu")
+      features_trans_bn_layer = tf.keras.layers.BatchNormalization()
+      
+      #Add the layers to cooresponding dicts
+      embeddings_transform_layers.update({embeddings_transform_layer_name : embeddings_transform_layer})
+      embeddings_reshape_layers.update({embeddings_reshape_layer_name : embeddings_reshape_layer})
+      embeddings_bn_layers.update({embeddings_bn_layer_name : embeddings_bn_layer})
+      
+      features_trans_layers.update({features_trans_layer_name:features_trans_layer})
+      features_trans_bn_layers.update({features_trans_bn_layer_name:features_trans_bn_layer})
+    
+    
+    # Define the inputs of the model with a shape (Tx,)
+    # Define s0 (initial hidden state) and c0 (initial cell state)
+    # for the decoder LSTM with shape (n_s,)
+    X = Input(shape=(Tx, input_size))
+    s0 = Input(shape=(n_s,), name='s0')
+    c0 = Input(shape=(n_s,), name='c0')
+    s = s0
+    c = c0
+    
+    # Initialize empty list of outputs
+    outputs = []
+ 
+    cat_embedding_features_list = []
+    one_hot_features_list = []
+    
+    #generate entity embeddings for each categorical variable in a for loop 
+    #i = 0
+    for key in index_positions_dict.keys():
+
+      i  = index_positions_dict[key]
+      index_feature = X[:,:,i]
+
+      index_feature =  tf.cast(index_feature, tf.int32)
+    
+      index_feature_int =  tf.cast(index_feature, tf.int32)
+      index_feauture_one_hot = tf.one_hot(index_feature_int, index_original_dimensions)
+
+      index_feature = embeddings_transform_layers[key + "embedding_transform"](index_feature)
+      index_feature = embeddings_reshape_layers[key + "embedding_reshape"](index_feature)
+      index_feature = embeddings_bn_layers[key + "embedding_bn"](index_feature)
+      
+      index_feature = features_trans_layers[key + "features_trans"](index_feature)
+      index_feature = features_trans_bn_layers[key + "features_trans_bn"](index_feature)
+      
+      
+      cat_embedding_features_list.append(index_feature)
+      one_hot_features_list.append(index_feauture_one_hot)
+
+    # concatenate the entity embeddings with the numeric features 
+    numeric_features = X[:,:,max(len(index_positions_dict.keys())-1,cat_features_amount):]
+    features_list = cat_embedding_features_list
+
+    features_list.append(numeric_features)                    
+    features = tf.keras.layers.concatenate(features_list)
+    cat_embedding_features = tf.keras.layers.concatenate(cat_embedding_features_list)
+    cat_one_hot_features = tf.keras.layers.concatenate(one_hot_features_list)
+    
+    
+    a = Bidirectional(LSTM(units=n_a, return_sequences=True))(numeric_features)
+    
+    # Step 2: Iterate for Ty steps
+    for t in range(Ty):
+        
+        context = one_step_attention(a, s, repeator = repeator, concatenator = concatenator,densor1 = densor1, densor2 = densor2,activator = activator, dotor = dotor )
+        
+        s, _, c = post_activation_LSTM_cell(inputs=context, initial_state=[s, c])
+        
+        out = output_layer_1(inputs=s)
+        out = bn(inputs=out)
+        out = output_layer_2(inputs=out)
+        #out = self.drop(inputs=out)
+        #out = self.output_layer_3(inputs=out)
+        #out = self.output_layer_4(inputs=out)
+        final_out = output_layer_5(inputs=out)
+        
+        # Step 2.D: Append "out" to the "outputs" list
+        outputs.append(final_out)
+    
+    # Step 3: Create model instance taking three inputs and returning the list of outputs. 
+    model = Model(inputs=[X,s0,c0], outputs=outputs)
+       
+    return model 
+  
+  
+def sequence_transcation_fraud_detection(Tx, Ty, n_a, n_s, input_size, out_size):
+    """
+    Arguments:
+    Tx -- length of the input sequence
+    Ty -- length of the output sequence
+    n_a -- hidden state size of the Bi-LSTM
+    n_s -- hidden state size of the post-attention LSTM
+
+    Returns:
+    model -- Keras model instance
+    """
+    
+    repeator = RepeatVector(Tx)
+    concatenator = Concatenate(axis=-1)
+    densor1 = Dense(10, activation = "tanh")
+    densor2 = Dense(1, activation = "relu")
+    activator = Activation("softmax", name='attention_weights') 
+    dotor = Dot(axes = 1)
+
+    
+    post_activation_LSTM_cell = LSTM(n_s, return_state = True) # post-attention LSTM 
+    output_layer_1 = Dense(16, activation="relu")
+    output_layer_2 = Dense(16, activation="relu")
+    output_layer_3 = Dense(16, activation="relu")
+    output_layer_4 = Dense(8, activation="relu")
+    output_layer_5 = Dense(1, activation="sigmoid")
+    bn = keras.layers.BatchNormalization()
+    drop = keras.layers.Dropout(0.5)
+    
+    # Define the inputs of the model with a shape (Tx,)
+    # Define s0 (initial hidden state) and c0 (initial cell state)
+    # for the decoder LSTM with shape (n_s,)
+    X = Input(shape=(Tx, input_size))
+    s0 = Input(shape=(n_s,), name='s0')
+    c0 = Input(shape=(n_s,), name='c0')
+    s = s0
+    c = c0
+    
+    # Initialize empty list of outputs
+    outputs = []
+   
+    a = Bidirectional(LSTM(units=n_a, return_sequences=True))(X)
+    
+    # Step 2: Iterate for Ty steps
+    for t in range(Ty):
+        
+        context = one_step_attention(a, s, repeator = repeator, concatenator = concatenator,densor1 = densor1, densor2 = densor2,activator = activator, dotor = dotor )
+        
+        s, _, c = post_activation_LSTM_cell(inputs=context, initial_state=[s, c])
+        
+        out = output_layer_1(inputs=s)
+        out = bn(inputs=out)
+        out = output_layer_2(inputs=out)
+        #out = self.drop(inputs=out)
+        #out = self.output_layer_3(inputs=out)
+        #out = self.output_layer_4(inputs=out)
+        final_out = output_layer_5(inputs=out)
+        
+        # Step 2.D: Append "out" to the "outputs" list
+        outputs.append(final_out)
+    
+    # Step 3: Create model instance taking three inputs and returning the list of outputs. 
+    model = Model(inputs=[X,s0,c0], outputs=outputs)
+       
+    return model
